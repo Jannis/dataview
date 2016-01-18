@@ -1,8 +1,10 @@
 (ns dataview.test.view
-  (:require [clojure.test.check.clojure-test :refer [defspec]]
+  (:require [clojure.pprint :refer [pprint]]
+            [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test :refer [deftest is use-fixtures]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [com.rpl.specter :refer :all]
             [datomic.api :as d]
             [datomic-schema.schema :as ds]
             [dataview.core :as dv]
@@ -85,9 +87,11 @@
         :transform '[[ALL] inc]}}})))
 
 (defn create-schemas [conn schemas]
-  (d/transact conn (concat
-                    (ds/generate-parts [(ds/part "test")])
-                    (ds/generate-schema schemas))))
+  (println "create-schemas")
+  (pprint schemas)
+  @(d/transact conn (concat
+                     (ds/generate-parts [(ds/part "test")])
+                     (ds/generate-schema schemas))))
 
 (defn define-container []
   (with-conn
@@ -97,6 +101,7 @@
                               UserWithJoin
                               UserWithManyJoin
                               UserWithRecursiveJoin}
+                     :conn conn
                      :create-schemas #(create-schemas conn %)
                      :notify #()}))))
 
@@ -114,13 +119,6 @@
   (teardown))
 
 (use-fixtures :each data-views-fixture)
-
-;; (with-conn
-;;   (let [materializer (dv/materializer {:views [SimpleUser
-;;                                                Blog
-;;                                                UserWithJoin
-;;                                                UserWithManyJoin]
-;;                                        :conn conn})]))
 
 (deftest defdataview-satisifes-protocols
   (is (satisfies? dv/IName SimpleUser))
@@ -247,3 +245,4 @@
                      [:user-with-recursive-join/username
                       {:user-with-recursive-join/friends
                        [:user-with-recursive-join/username]}])))))
+

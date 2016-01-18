@@ -1,6 +1,7 @@
 (ns dataview.core
   (:refer-clojure :exclude [name])
-  (:require [com.rpl.specter :refer :all]
+  (:require [clojure.core.async :refer [go]]
+            [com.rpl.specter :refer :all]
             [datascript.core :as ds]
             [datomic.api :as d]
             [datomic-schema.schema :as s]))
@@ -39,7 +40,9 @@
          [this query* where]))
 
 (defprotocol IContainer
-  (create-schemas [this]))
+  (create-schemas [this])
+  (watch-report-queue! [this])
+  (rebuild-views! [this]))
 
 ;;;; Data view validation
 
@@ -129,7 +132,9 @@
         data     (if tspec
                    (let [seq-data (if (coll? raw-data) raw-data [raw-data])
                          tform    (into [] (conj tspec seq-data))
-                         res      (apply transform (eval tform))]
+                         _        (println "tform" tform)
+                         res      (apply transform tform)
+                         _        (println "  >" res)]
                      (cond-> res
                        (not (coll? raw-data)) first))
                    raw-data)]
@@ -176,9 +181,13 @@
 
   IBuild
   (build! [this conn]
+    ;; (println "build! conn:" conn (d/db conn))
+    ;; (println "build! data query:" (:data config))
+    ;; (println "build! pull query:" (pull-query this))
     (let [data (d/q (:data config)
                     (d/db conn)
                     (pull-query this))]
+      ;; (println "build! data:" data)
       (->> data
            (mapv #(derive-attrs this conn %))
            (ds/transact! db)))))
@@ -205,13 +214,27 @@
   (create-schemas [this]
     (let [schemas (mapv datomic-schema (:views config))]
       (when (:create-schemas config)
-        ((:create-schemas config) schemas)))))
+        ((:create-schemas config) schemas))))
+
+  (rebuild-views! [this]
+    (run! #(build! % (:conn config)) (:views config)))
+
+  (watch-report-queue! [this]
+    (let [queue (d/tx-report-queue (:conn config))]
+      (go
+        (while true
+          (let [tx (.take queue)]
+            (rebuild-views! this)))))))
 
 (defn container
-  [{:keys [views create-schemas notify]}]
+  [{:keys [conn views create-schemas notify]}]
   {:pre [(every? #(instance? DataView %) views)]}
   (let [container* (DataViewContainer.
-                    {:views views
+                    {:conn conn
+                     :views views
                      :create-schemas create-schemas
                      :notify notify})]
-    (dataview.core/create-schemas container*)))
+    (dataview.core/create-schemas container*)
+    (dosync
+     (watch-report-queue! container*)
+     (rebuild-views! container*))))

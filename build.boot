@@ -12,6 +12,7 @@
                  [datascript "0.15.0"]
                  [datomic-schema "1.3.0"]
                  [org.clojure/clojure "1.7.0"]
+                 [org.clojure/core.async "0.2.374"]
 
                  ;; Tests
                  [org.clojure/test.check "0.9.0"]])
