@@ -1,7 +1,8 @@
 (ns dataview.core
   (:refer-clojure :exclude [name])
-  (:require [datomic.api :as d]
-            [datomic-schema.schema :as ds]))
+  (:require [datascript.core :as ds]
+            [datomic.api :as d]
+            [datomic-schema.schema :as s]))
 
 ;;;; Utilities
 
@@ -20,6 +21,9 @@
 (defprotocol IPullQuery
   (pull-query [this]))
 
+(defprotocol IDerivedAttrs
+  (derived-attrs [this]))
+
 (defprotocol IBuild
   (build! [this conn]))
 
@@ -29,7 +33,8 @@
   (update-data! [this f] [this k f]))
 
 (defprotocol IQuery
-  (query [this query & clauses]))
+  (query [this query*]
+         [this query* where]))
 
 (defprotocol IContainer
   (create-schemas [this]))
@@ -42,8 +47,12 @@
 (defn- view-schema-valid? [schema]
   (map? schema))
 
-(defn- view-build-valid? [query]
+(defn- view-data-valid? [query]
   true)
+
+(defn- view-derived-attrs-valid? [attrs]
+  (and (map? attrs)
+       (every? (fn [[k v]] (keyword? k)) attrs)))
 
 (defn schema? [x]
   (view-schema-valid? x))
@@ -64,7 +73,7 @@
 
 (defn schema->datomic-schema [name schema]
   (let [fields (schema->fields schema)]
-    (eval `(ds/schema ~name (ds/fields ~@fields)))))
+    (eval `(s/schema ~name (s/fields ~@fields)))))
 
 (defn schema->joins [schema]
   (letfn [(field->join [res [k v]]
@@ -72,29 +81,40 @@
               (map? v) (conj {k (first (vals v))})))]
     (reduce field->join [] schema)))
 
-(defn field->attr [ename [pname _ :as field]]
-  (keyword (clojure.core/name ename) (clojure.core/name pname)))
+(defn field-name->attr-name [ename fname]
+  (keyword (clojure.core/name ename)
+           (clojure.core/name fname)))
 
 (defn schema->pull-query [name schema]
   (let [attrs      (into []
                          (comp (remove join?)
-                            (map #(field->attr name %)))
+                            (map (fn [[fname fspec]]
+                                   (field-name->attr-name name fname))))
                          schema)
         joins      (schema->joins schema)
         join-attrs (mapv (fn [m]
-                           (let [[pname view :as join] (first m)
-                                 view-attrs            (if (= view '...)
-                                                         '...
-                                                         (pull-query view))
-                                 join-with-attrs       [pname view-attrs]]
-                             (hash-map (field->attr name join-with-attrs)
-                                       view-attrs)))
+                           (let [[fname view] (first m)]
+                             (hash-map (field-name->attr-name name fname)
+                                       (cond-> view
+                                         (not= view '...) pull-query))))
                          joins)]
     (into [] (concat [:db/id] attrs join-attrs))))
 
 ;;;; Data view definition
 
-(defrecord DataView [config data]
+(defn derive-attr [view conn entity [fname fspec]]
+  (let [aname (field-name->attr-name (name view) fname)
+        aval  (d/q fspec (d/db conn) (:db/id entity))]
+    (println "derive attr" aname aval)
+    (assoc entity aname aval)))
+
+(defn derive-attrs [view conn entity]
+  (println "derive attrs" view entity)
+  (reduce #(derive-attr view conn %1 %2)
+          entity
+          (derived-attrs view)))
+
+(defrecord DataView [config db]
   IName
   (name [this]
     (symbol (clojure.core/name (:name (:config this)))))
@@ -110,34 +130,43 @@
   (pull-query [this]
     (schema->pull-query (name this) (schema this)))
 
-  IData
-  (get-data [this]
-    @data)
+  IQuery
+  (query [this query*]
+    (query this query* []))
 
-  (set-data! [this new-data]
-    (reset! data new-data))
+  (query [this query* where]
+    (let [where' (into [] (concat ['[?x]] where))]
+      (ds/q `[:find [(~'pull ~'?x ~'?query) ...]
+                      :in ~'$ ~'?query
+                      :where ~@where']
+                    @db query*)))
 
-  (update-data! [this f]
-    (swap! data update (f data)))
-
-  (update-data! [this k f]
-    (swap! data update k f))
+  IDerivedAttrs
+  (derived-attrs [this]
+    (:derived-attrs config))
 
   IBuild
   (build! [this conn]
-    (let [build-query (:build config)
-          data (d/q build-query (d/db conn) (pull-query this))]
-      (set-data! this data))))
+    (println "build!" this conn)
+    (let [data (d/q (:data config)
+                    (d/db conn)
+                    (pull-query this))]
+      (println "build! data:" data)
+      (->> data
+           (mapv #(derive-attrs this conn %))
+           (ds/transact! db)))))
 
-(defn dataview [{:keys [name schema build]}]
+(defn dataview [{:keys [name schema data derived-attrs]}]
   [{:pre [(view-name-valid? name)
           (view-schema-valid? schema)
-          (view-build-valid? build)]}]
+          (view-data-valid? data)
+          (view-derived-attrs-valid? derived-attrs)]}]
   (DataView. {:name name
               :schema schema
               :datomic-schema (schema->datomic-schema name schema)
-              :build build}
-             (atom #{})))
+              :data data
+              :derived-attrs derived-attrs}
+             (ds/create-conn)))
 
 ;;;; Data view container
 
@@ -150,6 +179,7 @@
 
 (defn container
   [{:keys [views create-schemas notify]}]
+  {:pre [(every? #(instance? DataView %) views)]}
   (let [container* (DataViewContainer.
                     {:views views
                      :create-schemas create-schemas

@@ -9,6 +9,7 @@
                  ;; General
                  [com.datomic/datomic-free "0.9.5344"]
                  [com.rpl/specter "0.9.1"]
+                 [datascript "0.15.0"]
                  [datomic-schema "1.3.0"]
                  [org.clojure/clojure "1.7.0"]
 

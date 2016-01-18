@@ -16,18 +16,27 @@
      {:name   :simple-user
       :schema {:username [:string :indexed]
                :email [:string :unique]}
-      :build  '[:find [(pull ?u QUERY) ...]
+      :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
-                :where [?u :simple-user/username _]]}))
+                :where [?u :simple-user/username _]]
+      :derived-attrs
+      {:name-length '[:find ?length .
+                      :in $ ?u
+                      :where [?u :simple-user/username ?n]
+                             [(count ?n) ?length]]}}))
 
   (def Blog
     (dv/dataview
      {:name   :blog
       :schema {:title :string
                :description :string}
-      :build  '[:find [(pull ?u QUERY) ...]
+      :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
                 :where [?u :blog/title _]]}))
+
+  (defn not-empty?
+    [vals]
+    (not (empty? vals)))
 
   (def UserWithJoin
     (dv/dataview
@@ -35,9 +44,13 @@
       :schema {:username [:string :indexed]
                :email [:string :unique]
                :blog {:ref Blog}}
-      :build  '[:find [(pull ?u QUERY) ...]
+      :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
-                :where [?u :user-with-join/username _]]}))
+                :where [?u :user-with-join/username _]]
+      :derived-attrs
+      {:blogger? '[:find (dataview.test.view/not-empty? ?b)
+                   :in $ ?u
+                   :where [?u :user-with-join/blog ?b]]}}))
 
   (def UserWithManyJoin
     (dv/dataview
@@ -45,9 +58,13 @@
       :schema {:username [:string :indexed]
                :email [:string :unique]
                :blogs {[:ref :many] Blog}}
-      :build  '[:find [(pull ?u QUERY) ...]
+      :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
-                :where [?u :user-with-many-join/username _]]}))
+                :where [?u :user-with-many-join/username _]]
+      :derived-attrs
+      {:blog-count '[:find (count ?b)
+                     :in $ ?u
+                     :where [?u :user-with-join/blog ?b]]}}))
 
   (def UserWithRecursiveJoin
     (dv/dataview
@@ -55,9 +72,15 @@
       :schema {:username [:string :indexed]
                :email [:string :unique]
                :friends {[:ref :many] '...}}
-      :build  '[:find [(pull ?u QUERY) ...]
+      :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
-                :where [?u :user-with-recursive-join/username _]]})))
+                :where [?u :user-with-recursive-join/username _]]
+      :derived-attrs
+      {:popular? '[:find ?num-friends
+                   :in $ ?u
+                   :where [?u :user-with-recursive-join/friends ?f]
+                          [(count ?f) ?num-friends]
+                          [(> ?num-friends 1)]]}})))
 
 (defn create-schemas [conn schemas]
   (d/transact conn (concat
@@ -75,12 +98,18 @@
                      :create-schemas #(create-schemas conn %)
                      :notify #()}))))
 
-(defn data-views-fixture [f]
+(defn setup []
   (create-db)
   (define-data-views)
-  (define-container)
-  (f)
+  (define-container))
+
+(defn teardown []
   (delete-db))
+
+(defn data-views-fixture [f]
+  (setup)
+  (f)
+  (teardown))
 
 (use-fixtures :each data-views-fixture)
 
@@ -167,7 +196,7 @@
            [:db/id :blog/title :blog/description]}]
          (dv/pull-query UserWithManyJoin))))
 
-(deftest build-simple-user-populates-data
+(deftest simple-user-queries
   (with-conn
     @(d/transact conn [{:db/id (d/tempid :db.part/test)
                         :simple-user/username "Jeff"
@@ -176,14 +205,20 @@
                         :simple-user/username "Ada"
                         :simple-user/email "ada@ada.org"}])
     (dv/build! SimpleUser conn)
-    (is (= [{:simple-user/username "Jeff"
-             :simple-user/email "jeff@jeff.org"}
-            {:simple-user/username "Ada"
-             :simple-user/email "ada@ada.org"}]
-           (mapv #(dv/drop-keys % [:db/id])
-                 (dv/get-data SimpleUser))))))
+    (is (= #{{:simple-user/username "Jeff"}
+             {:simple-user/username "Ada"}}
+           (set (dv/query SimpleUser [:simple-user/username]))))
+    (is (= #{{:simple-user/email "jeff@jeff.org"}
+             {:simple-user/email "ada@ada.org"}}
+           (set (dv/query SimpleUser [:simple-user/email]))))
+    (is (= #{{:simple-user/username "Jeff"
+              :simple-user/email "jeff@jeff.org"}
+             {:simple-user/username "Ada"
+              :simple-user/email "ada@ada.org"}}
+           (set (dv/query SimpleUser [:simple-user/username
+                                      :simple-user/email]))))))
 
-(deftest build-user-with-recursive-join-populates-data
+(deftest user-with-recursive-join-queries
   (with-conn
     @(d/transact conn [{:db/id (d/tempid :db.part/test -1)
                         :user-with-recursive-join/username "Jeff"
@@ -200,30 +235,8 @@
                         :user-with-recursive-join/friends
                         {:db/id (d/tempid :db.part/test -2)}}])
     (dv/build! UserWithRecursiveJoin conn)
-    (let [users      (into #{}
-                           (map #(dv/drop-keys % [:db/id]))
-                           (dv/get-data UserWithRecursiveJoin))
-          matches?   #(= %1 (:user-with-recursive-join/username %2))
-          fetch-user (fn [username]
-                       (->> users
-                            (filter #(matches? username %))
-                            (first)))]
-      (is (= #{{:user-with-recursive-join/username "Jeff"
-                :user-with-recursive-join/email "jeff@jeff.org"}
-               {:user-with-recursive-join/username "Ada"
-                :user-with-recursive-join/email "ada@ada.org"}
-               {:user-with-recursive-join/username "May"
-                :user-with-recursive-join/email "may@may.org"}}
-             (into #{}
-                   (map #(select-keys
-                          % [:user-with-recursive-join/username
-                             :user-with-recursive-join/email]))
-                   users)))
-      (let [jeff (fetch-user "Jeff")
-            friends (:user-with-recursive-join/friends jeff)]
-        (is (and (= 2 (count friends))
-                 (every? map? friends)
-                 (every? #(find % :user-with-recursive-join/username)
-                         friends)
-                 (every? #(find % :user-with-recursive-join/email)
-                         friends)))))))
+    (is (= #{{:user-with-recursive-join/username "Jeff"}
+             {:user-with-recursive-join/username "Ada"}
+             {:user-with-recursive-join/username "May"}}
+           (set (dv/query UserWithRecursiveJoin
+                          [:user-with-recursive-join/username]))))))
