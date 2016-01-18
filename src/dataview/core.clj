@@ -1,6 +1,7 @@
 (ns dataview.core
   (:refer-clojure :exclude [name])
-  (:require [datascript.core :as ds]
+  (:require [com.rpl.specter :refer :all]
+            [datascript.core :as ds]
             [datomic.api :as d]
             [datomic-schema.schema :as s]))
 
@@ -16,7 +17,8 @@
 
 (defprotocol ISchema
   (schema [this])
-  (datomic-schema [this]))
+  (datomic-schema [this])
+  (datascript-schema [this]))
 
 (defprotocol IPullQuery
   (pull-query [this]))
@@ -75,6 +77,23 @@
   (let [fields (schema->fields schema)]
     (eval `(s/schema ~name (s/fields ~@fields)))))
 
+(defn schema->datascript-schema [name schema]
+  (letfn [(datomic-attr->datascript-attr [schema attr]
+            (let [aname (:db/ident attr)]
+              (assoc schema aname
+                     (merge (select-keys attr [:db/index
+                                               :db/noHistory
+                                               :db/isComponent
+                                               :db/fulltext
+                                               :db/cardinality
+                                               :db/doc])
+                            (when (= :db.type/ref (:db/valueType attr))
+                              (select-keys attr [:db/valueType]))))))]
+    (let [datomic-schema (schema->datomic-schema name schema)]
+      (reduce datomic-attr->datascript-attr
+              {}
+              (s/generate-schema [datomic-schema])))))
+
 (defn schema->joins [schema]
   (letfn [(field->join [res [k v]]
             (cond-> res
@@ -126,6 +145,9 @@
   (datomic-schema [this]
     (:datomic-schema config))
 
+  (datascript-schema [this]
+    (:datascript-schema config))
+
   IPullQuery
   (pull-query [this]
     (schema->pull-query (name this) (schema this)))
@@ -161,12 +183,15 @@
           (view-schema-valid? schema)
           (view-data-valid? data)
           (view-derived-attrs-valid? derived-attrs)]}]
-  (DataView. {:name name
-              :schema schema
-              :datomic-schema (schema->datomic-schema name schema)
-              :data data
-              :derived-attrs derived-attrs}
-             (ds/create-conn)))
+  (let [datomic-schema    (schema->datomic-schema name schema)
+        datascript-schema (schema->datascript-schema name schema)]
+    (DataView. {:name name
+                :schema schema
+                :datomic-schema datomic-schema
+                :datascript-schema datascript-schema
+                :data data
+                :derived-attrs derived-attrs}
+               (ds/create-conn datascript-schema))))
 
 ;;;; Data view container
 
