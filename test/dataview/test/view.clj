@@ -20,10 +20,12 @@
                 :in $ QUERY
                 :where [?u :simple-user/username _]]
       :derived-attrs
-      {:name-length '[:find ?length .
-                      :in $ ?u
-                      :where [?u :simple-user/username ?n]
-                             [(count ?n) ?length]]}}))
+      {:name-length
+       {:data '[:find ?length .
+                :in $ ?u
+                :where [?u :simple-user/username ?n]
+                [(count ?n) ?length]]
+        :transform '[[ALL] inc]}}}))
 
   (def Blog
     (dv/dataview
@@ -48,9 +50,9 @@
                 :in $ QUERY
                 :where [?u :user-with-join/username _]]
       :derived-attrs
-      {:blogger? '[:find (dataview.test.view/not-empty? ?b)
-                   :in $ ?u
-                   :where [?u :user-with-join/blog ?b]]}}))
+      {:blogger? {:data '[:find (dataview.test.view/not-empty? ?b)
+                          :in $ ?u
+                          :where [?u :user-with-join/blog ?b]]}}}))
 
   (def UserWithManyJoin
     (dv/dataview
@@ -62,25 +64,25 @@
                 :in $ QUERY
                 :where [?u :user-with-many-join/username _]]
       :derived-attrs
-      {:blog-count '[:find (count ?b)
-                     :in $ ?u
-                     :where [?u :user-with-join/blog ?b]]}}))
+      {:blog-count {:data '[:find (count ?b)
+                            :in $ ?u
+                            :where [?u :user-with-join/blog ?b]]}}}))
 
   (def UserWithRecursiveJoin
     (dv/dataview
      {:name   :user-with-recursive-join
-      :schema {:username [:string :indexed]
-               :email [:string :unique]
+      :schema {:username [:string :unique :indexed :identity]
+               :email [:string :unique :identity]
                :friends {[:ref :many] '...}}
       :data   '[:find [(pull ?u QUERY) ...]
                 :in $ QUERY
                 :where [?u :user-with-recursive-join/username _]]
       :derived-attrs
-      {:popular? '[:find ?num-friends
-                   :in $ ?u
-                   :where [?u :user-with-recursive-join/friends ?f]
-                          [(count ?f) ?num-friends]
-                          [(> ?num-friends 1)]]}})))
+      {:popular?
+       {:data      '[:find  [?f ...]
+                     :in $ ?u
+                     :where [?u :user-with-recursive-join/friends ?f]]
+        :transform '[[ALL] inc]}}})))
 
 (defn create-schemas [conn schemas]
   (d/transact conn (concat
@@ -239,4 +241,9 @@
              {:user-with-recursive-join/username "Ada"}
              {:user-with-recursive-join/username "May"}}
            (set (dv/query UserWithRecursiveJoin
-                          [:user-with-recursive-join/username]))))))
+                          [:user-with-recursive-join/username]))))
+    (is (= :foo
+           (dv/query UserWithRecursiveJoin
+                     [:user-with-recursive-join/username
+                      {:user-with-recursive-join/friends
+                       [:user-with-recursive-join/username]}])))))

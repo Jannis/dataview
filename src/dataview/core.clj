@@ -121,14 +121,21 @@
 
 ;;;; Data view definition
 
-(defn derive-attr [view conn entity [fname fspec]]
-  (let [aname (field-name->attr-name (name view) fname)
-        aval  (d/q fspec (d/db conn) (:db/id entity))]
-    (println "derive attr" aname aval)
-    (assoc entity aname aval)))
+(defn derive-attr [view conn entity [fname dspec]]
+  (let [aname    (field-name->attr-name (name view) fname)
+        fspec    (:data dspec)
+        tspec    (:transform dspec)
+        raw-data (d/q fspec (d/db conn) (:db/id entity))
+        data     (if tspec
+                   (let [seq-data (if (coll? raw-data) raw-data [raw-data])
+                         tform    (into [] (conj tspec seq-data))
+                         res      (apply transform (eval tform))]
+                     (cond-> res
+                       (not (coll? raw-data)) first))
+                   raw-data)]
+    (assoc entity aname data)))
 
 (defn derive-attrs [view conn entity]
-  (println "derive attrs" view entity)
   (reduce #(derive-attr view conn %1 %2)
           entity
           (derived-attrs view)))
@@ -169,11 +176,9 @@
 
   IBuild
   (build! [this conn]
-    (println "build!" this conn)
     (let [data (d/q (:data config)
                     (d/db conn)
                     (pull-query this))]
-      (println "build! data:" data)
       (->> data
            (mapv #(derive-attrs this conn %))
            (ds/transact! db)))))
