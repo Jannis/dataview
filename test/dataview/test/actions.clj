@@ -14,8 +14,6 @@
 
 (defn create-schemas [conn schemas]
   (println "create-schemas")
-  (pprint schemas)
-  (pprint (ds/generate-schema schemas))
   @(d/transact conn (concat
                      (ds/generate-parts [(ds/part "test")])
                      (ds/generate-schema schemas))))
@@ -93,7 +91,7 @@
                         :user/verified? false}
                        {:db/id (d/tempid :db.part/test -3)
                         :user/email "joe@joe.org"
-                        :user/verified? true}
+                        :user/verified? false}
                        {:db/id (d/tempid :db.part/test -4)
                         :action/name "One"
                         :action/amount 1}
@@ -116,40 +114,54 @@
   (Thread/sleep 1000)
 
   (println "INITIAL USERS")
-  ;; (pprint (dv/pull-query User))
   (pprint (dv/query User '[*]))
 
   (println "INITIAL PLEDGES")
-  ;; (pprint (dv/pull-query Pledge))
   (pprint (dv/query Pledge '[*]))
 
   (println "INITIAL ACTIONS")
-  ;; (pprint (dv/pull-query Action))
   (pprint (dv/query Action '[*]))
 
   (with-conn
-    (let [joe     (dv/query User '[*] [[:?x :user/name "Joe"]])
-          linda   (dv/query User '[*] [[:?x :user/name "Linda"]])
-          jeff    (dv/query User '[*] [[:?x :user/name "Jeff"]])
-          pledges (dv/query Pledge '[*])
-          _ (println "pledges" pledges)]
+    (let [joe     (first (dv/query User '[*]
+                                   [['?x :user/email "joe@joe.org"]]))
+          linda   (first (dv/query User '[*]
+                                   [['?x :user/email "linda@linda.org"]]))
+          jeff    (first (dv/query User '[*]
+                                   [['?x :user/email "jeff@jeff.org"]]))
+          pledges (dv/query Pledge '[*])]
       @(d/transact conn
-                   [(merge joe {:user/pledges (pledges 0)})
+                   [(merge joe   {:user/pledges (pledges 0)})
                     (merge linda {:user/pledges (pledges 1)})
-                    (merge jeff {:user/pledges (pledges 2)})])))
+                    (merge jeff  {:user/pledges (pledges 2)})])))
 
   (Thread/sleep 1000)
 
   (println "USERS AFTER PLEDING")
-  ;; (pprint (dv/pull-query User))
   (pprint (dv/query User '[*]))
 
-  (println "PLEDGES AFTER PLEDGIN")
-  ;; (pprint (dv/pull-query Pledge))
+  (println "PLEDGES AFTER PLEDGING")
   (pprint (dv/query Pledge '[*]))
 
   (println "ACTIONS AFTER PLEDGING")
-  ;; (pprint (dv/pull-query Action))
+  (println "Note: :action/pledges all 0 because none of the")
+  (println "      users are verified yet")
+  (pprint (dv/query Action '[*]))
+
+  (with-conn
+    (let [users (dv/query User '[*])]
+      @(d/transact conn (mapv #(assoc % :user/verified? true) users))))
+
+  (Thread/sleep 1000)
+
+  (println "USERS AFTER VERIFICATION")
+  (pprint (dv/query User '[*]))
+
+  (println "PLEDGES AFTER VERIFICATION")
+  (pprint (dv/query Pledge '[*]))
+
+  (println "ACTIONS AFTER VERIFICATION")
+  (println "Note: :action/pledges are now set properly")
   (pprint (dv/query Action '[*])))
 
 (comment
