@@ -25,14 +25,14 @@
 
 ;;; Source queries
 
-(defn query-main
+(defn- query-main
   [{:keys [conn query-attrs query view]} source q extra]
   (let [attrs (query-attrs view)]
     (query conn view
            (:query source)
            {:inputs [attrs] :extra extra})))
 
-(defn query-derived-attr
+(defn- query-derived-attr
   [{:keys [data conn entity-id merge-attr
            query transform view]} source]
   (mapv (fn [entity]
@@ -47,7 +47,7 @@
                         (:name source) tformed)))
         data))
 
-(defmulti query-sources (fn [_ _ _ _ [type _]] type))
+(defmulti ^:private query-sources (fn [_ _ _ _ [type _]] type))
 
 (defmethod query-sources :main
   [view q extra data [type sources]]
@@ -72,7 +72,7 @@
   [_ _ _ _ [type _]]
   (throw (Exception. (str "Unknown source type: " type))))
 
-(defn compare-source-types [t1 t2]
+(defn- compare-source-types [t1 t2]
   (let [order [:main :derived-attr]]
     (compare (.indexOf order t1) (.indexOf order t2))))
 
@@ -128,20 +128,20 @@
     (let [views (:views config)]
       (first (filter #(= name (get-name %)) views)))))
 
-(defn default-query-attrs [view]
+(defn- default-query-attrs [view]
   [])
 
-(defn default-query
+(defn- default-query
   [conn view query {:keys [inputs extra]}]
   conn)
 
-(defn default-transform [tspec raw-value]
+(defn- default-transform [tspec raw-value]
   (tspec raw-value))
 
-(defn default-merge-main [mains main]
+(defn- default-merge-main [mains main]
   (into [] (concat mains main)))
 
-(defn default-merge-attr [schema entity name value]
+(defn- default-merge-attr [schema entity name value]
   (assoc entity name value))
 
 (defn overview

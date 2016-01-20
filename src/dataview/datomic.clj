@@ -5,16 +5,16 @@
 
 ;;;; Datomic schema generation
 
-(defn kv->field [res [k v]]
+(defn- kv->field [res [k v]]
   (cond
     (vector? v) (conj res (into [] (concat [k] v)))
     (map? v)    (kv->field res [k (ffirst v)])
     :else       (conj res [k v])))
 
-(defn attrs->fields [schema]
+(defn- attrs->fields [schema]
   (reduce kv->field [] schema))
 
-(defn datomic-schema [{:keys [name attrs]}]
+(defn- datomic-schema [{:keys [name attrs]}]
   (let [fields (attrs->fields attrs)]
     (eval `(s/schema ~name (s/fields ~@fields)))))
 
@@ -28,7 +28,7 @@
 
 ;;;; Pull (attr) query generation
 
-(defn attr-name [schema-name short-name]
+(defn- attr-name [schema-name short-name]
   (keyword (name schema-name) (name short-name)))
 
 (defn- join? [[short-name spec]]
