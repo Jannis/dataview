@@ -1,240 +1,178 @@
 (ns dataview.core
   (:refer-clojure :exclude [name])
   (:require [clojure.core.async :refer [go]]
-            [com.rpl.specter :refer :all]
-            [datascript.core :as ds]
-            [datomic.api :as d]
-            [datomic-schema.schema :as s]))
+            [clojure.test :refer [function?]]
+            [com.rpl.specter :as specter]))
 
-;;;; Utilities
+;;;; Transformations
 
-(defn drop-keys [m ks]
-  (into {} (remove (fn [[k v]] (some #{k} ks))) m))
+(defn transform-specter [tspec raw-data]
+  (let [seq-data (if (coll? raw-data) raw-data [raw-data])
+        tform    (into [] (conj tspec seq-data))
+        res      (apply specter/transform tform)]
+    (cond-> res
+      (not (coll? raw-data)) first)))
 
-;;;; Protocols
+;;;; Data view protocol
 
-(defprotocol IName
-  (name [this]))
-
-(defprotocol ISchema
+(defprotocol IDataView
+  (get-name [this])
   (schema [this])
-  (datomic-schema [this])
-  (datascript-schema [this]))
+  (sources [this])
+  (query-attrs [this])
+  (query [this q]
+         [this q extra]))
 
-(defprotocol IPullQuery
-  (pull-query [this]))
+;;; Source queries
 
-(defprotocol IDerivedAttrs
-  (derived-attrs [this]))
+(defn query-main
+  [{:keys [conn query-attrs query view]} source q extra]
+  (let [attrs (query-attrs view)]
+    (query conn view
+           (:query source)
+           {:inputs [attrs] :extra extra})))
 
-(defprotocol IBuild
-  (build! [this conn]))
+(defn query-derived-attr
+  [{:keys [data conn entity-id merge-attr
+           query transform view]} source]
+  (mapv (fn [entity]
+          (let [id      (entity-id entity)
+                raw     (query conn view
+                               (:query source)
+                               {:inputs [id]})
+                tformed (cond->> raw
+                          (:transform source)
+                          (transform (:transform source)))]
+            (merge-attr (schema view) entity
+                        (:name source) tformed)))
+        data))
 
-(defprotocol IData
-  (get-data [this])
-  (set-data! [this data])
-  (update-data! [this f] [this k f]))
+(defmulti query-sources (fn [_ _ _ _ [type _]] type))
 
-(defprotocol IQuery
-  (query [this query*]
-         [this query* where]))
+(defmethod query-sources :main
+  [view q extra data [type sources]]
+  (let [config     (:config view)
+        merge-main (:merge-main config)]
+    (reduce (fn [data source]
+              (let [env   (merge config {:view view :data data})
+                    sdata (query-main env source q extra)]
+                (merge-main data sdata)))
+            data
+            sources)))
 
-(defprotocol IContainer
-  (create-schemas [this])
-  (watch-report-queue! [this])
-  (rebuild-views! [this]))
+(defmethod query-sources :derived-attr
+  [view _ _ ret [type sources]]
+  (let [config (:config view)]
+    (reduce (fn [ret source]
+              (let [env (merge config {:view view :data ret})]
+                (query-derived-attr env source)))
+            ret sources)))
 
-;;;; Data view validation
+(defmethod query-sources :default
+  [_ _ _ _ [type _]]
+  (throw (Exception. (str "Unknown source type: " type))))
 
-(defn- view-name-valid? [name]
-  (keyword? name))
+(defn compare-source-types [t1 t2]
+  (let [order [:main :derived-attr]]
+    (compare (.indexOf order t1) (.indexOf order t2))))
 
-(defn- view-schema-valid? [schema]
-  (map? schema))
+;;;; Data view implementation
 
-(defn- view-data-valid? [query]
-  true)
+(defrecord DataView [config]
+  IDataView
+  (get-name [this]
+    (:name (schema this)))
 
-(defn- view-derived-attrs-valid? [attrs]
-  (and (map? attrs)
-       (every? (fn [[k v]] (keyword? k)) attrs)))
-
-(defn schema? [x]
-  (view-schema-valid? x))
-
-(defn join? [[k v]]
-  (and (map? v) (= 1 (count v))))
-
-;;;; Schema parsing and translation
-
-(defn kv->field [res [k v]]
-  (cond
-    (vector? v) (conj res (into [] (concat [k] v)))
-    (map? v)    (kv->field res [k (ffirst v)])
-    :else       (conj res [k v])))
-
-(defn schema->fields [schema]
-  (reduce kv->field [] schema))
-
-(defn schema->datomic-schema [name schema]
-  (let [fields (schema->fields schema)]
-    (eval `(s/schema ~name (s/fields ~@fields)))))
-
-(defn schema->datascript-schema [name schema]
-  (letfn [(datomic-attr->datascript-attr [schema attr]
-            (let [aname (:db/ident attr)]
-              (assoc schema aname
-                     (merge (select-keys attr [:db/index
-                                               :db/noHistory
-                                               :db/isComponent
-                                               :db/fulltext
-                                               :db/cardinality
-                                               :db/doc])
-                            (when (= :db.type/ref (:db/valueType attr))
-                              (select-keys attr [:db/valueType]))))))]
-    (let [datomic-schema (schema->datomic-schema name schema)]
-      (reduce datomic-attr->datascript-attr
-              {}
-              (s/generate-schema [datomic-schema])))))
-
-(defn schema->joins [schema]
-  (letfn [(field->join [res [k v]]
-            (cond-> res
-              (map? v) (conj {k (first (vals v))})))]
-    (reduce field->join [] schema)))
-
-(defn field-name->attr-name [ename fname]
-  (keyword (clojure.core/name ename)
-           (clojure.core/name fname)))
-
-(defn schema->pull-query [name schema]
-  (let [attrs      (into []
-                         (comp (remove join?)
-                            (map (fn [[fname fspec]]
-                                   (field-name->attr-name name fname))))
-                         schema)
-        joins      (schema->joins schema)
-        join-attrs (mapv (fn [m]
-                           (let [[fname view] (first m)]
-                             (hash-map (field-name->attr-name name fname)
-                                       (cond-> view
-                                         (not= view '...) pull-query))))
-                         joins)]
-    (into [] (concat [:db/id] attrs join-attrs))))
-
-;;;; Data view definition
-
-(defn derive-attr [view conn entity [fname dspec]]
-  (let [aname    (field-name->attr-name (name view) fname)
-        fspec    (:data dspec)
-        tspec    (:transform dspec)
-        raw-data (d/q fspec (d/db conn) (:db/id entity))
-        data     (if tspec
-                   (let [seq-data (if (coll? raw-data) raw-data [raw-data])
-                         tform    (into [] (conj tspec seq-data))
-                         _        (println "tform" tform)
-                         res      (apply transform tform)
-                         _        (println "  >" res)]
-                     (cond-> res
-                       (not (coll? raw-data)) first))
-                   raw-data)]
-    (assoc entity aname data)))
-
-(defn derive-attrs [view conn entity]
-  (reduce #(derive-attr view conn %1 %2)
-          entity
-          (derived-attrs view)))
-
-(defrecord DataView [config db]
-  IName
-  (name [this]
-    (symbol (clojure.core/name (:name (:config this)))))
-
-  ISchema
   (schema [this]
     (:schema config))
 
-  (datomic-schema [this]
-    (:datomic-schema config))
+  (sources [this]
+    (:sources config))
 
-  (datascript-schema [this]
-    (:datascript-schema config))
+  (query-attrs [this]
+    ((:query-attrs config) this))
 
-  IPullQuery
-  (pull-query [this]
-    (schema->pull-query (name this) (schema this)))
+  (query [this q]
+    (query this q nil))
 
-  IQuery
-  (query [this query*]
-    (query this query* []))
+  (query [this q extra]
+    (let [sources (sources this)
+          sorted  (sort-by :type compare-source-types sources)
+          grouped (group-by :type sorted)]
+      (reduce #(query-sources this q extra %1 %2)
+              nil
+              grouped))))
 
-  (query [this query* where]
-    (let [where' (into [] (concat ['[?x]] where))]
-      (ds/q `[:find [(~'pull ~'?x ~'?query) ...]
-                      :in ~'$ ~'?query
-                      :where ~@where']
-                    @db query*)))
+(defn dataview
+  [{:keys [schema sources] :as config}]
+  {:pre [(and (map? schema) (contains? schema :name))]}
+  (DataView. config))
 
-  IDerivedAttrs
-  (derived-attrs [this]
-    (:derived-attrs config))
+;;;; Overview protocol
 
-  IBuild
-  (build! [this conn]
-    ;; (println "build! conn:" conn (d/db conn))
-    ;; (println "build! data query:" (:data config))
-    ;; (println "build! pull query:" (pull-query this))
-    (let [data (d/q (:data config)
-                    (d/db conn)
-                    (pull-query this))]
-      ;; (println "build! data:" data)
-      (->> data
-           (mapv #(derive-attrs this conn %))
-           (ds/transact! db)))))
+(defprotocol IOverview
+  (get-view [this name]))
 
-(defn dataview [{:keys [name schema data derived-attrs]}]
-  [{:pre [(view-name-valid? name)
-          (view-schema-valid? schema)
-          (view-data-valid? data)
-          (view-derived-attrs-valid? derived-attrs)]}]
-  (let [datomic-schema    (schema->datomic-schema name schema)
-        datascript-schema (schema->datascript-schema name schema)]
-    (DataView. {:name name
-                :schema schema
-                :datomic-schema datomic-schema
-                :datascript-schema datascript-schema
-                :data data
-                :derived-attrs derived-attrs}
-               (ds/create-conn datascript-schema))))
+;;;; Overview implementation
 
-;;;; Data view container
+(defn- install-schemas! [overview]
+  (let [config  (:config overview)
+        conn    (:conn config)
+        views   (:views config)
+        schemas (mapv schema views)]
+    ((:install-schemas config) conn schemas)))
 
-(defrecord DataViewContainer [config]
-  IContainer
-  (create-schemas [this]
-    (let [schemas (mapv datomic-schema (:views config))]
-      (when (:create-schemas config)
-        ((:create-schemas config) schemas))))
+(defrecord Overview [config]
+  IOverview
+  (get-view [this name]
+    (let [views (:views config)]
+      (first (filter #(= name (get-name %)) views)))))
 
-  (rebuild-views! [this]
-    (run! #(build! % (:conn config)) (:views config)))
+(defn default-query-attrs [view]
+  [])
 
-  (watch-report-queue! [this]
-    (let [queue (d/tx-report-queue (:conn config))]
-      (go
-        (while true
-          (let [tx (.take queue)]
-            (rebuild-views! this)))))))
+(defn default-query
+  [conn view query {:keys [inputs extra]}]
+  conn)
 
-(defn container
-  [{:keys [conn views create-schemas notify]}]
-  {:pre [(every? #(instance? DataView %) views)]}
-  (let [container* (DataViewContainer.
-                    {:conn conn
-                     :views views
-                     :create-schemas create-schemas
-                     :notify notify})]
-    (dataview.core/create-schemas container*)
-    (dosync
-     (watch-report-queue! container*)
-     (rebuild-views! container*))))
+(defn default-transform [tspec raw-value]
+  (tspec raw-value))
+
+(defn default-merge-main [mains main]
+  (into [] (concat mains main)))
+
+(defn default-merge-attr [schema entity name value]
+  (assoc entity name value))
+
+(defn overview
+  [{:keys [views
+           conn install-schemas
+           entity-id
+           query-attrs query
+           transform
+           merge-main merge-attr]
+    :or {views           []
+         conn            nil
+         install-schemas #()
+         entity-id       identity
+         query-attrs     default-query-attrs
+         query           default-query
+         transform       default-transform
+         merge-main      default-merge-main
+         merge-attr      default-merge-attr}
+    :as config}]
+  {:pre [(map? config)]}
+  (let [config'    {:views views
+                    :conn conn
+                    :install-schemas install-schemas
+                    :entity-id entity-id
+                    :query-attrs query-attrs
+                    :query query
+                    :transform transform
+                    :merge-main merge-main
+                    :merge-attr merge-attr}
+        views'     (for [view-spec views]
+                     (dataview (merge config' view-spec)))
+        overview' (Overview. (assoc config' :views views'))]
+    (install-schemas! overview')
+    overview'))

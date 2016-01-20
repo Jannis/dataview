@@ -11,8 +11,11 @@
 (defn delete-db []
   (d/delete-database db-uri))
 
+(defn connect-to-db []
+  (d/connect db-uri))
+
 (defmacro with-conn
   [& body]
-  `(let [~(symbol "conn") (d/connect db-uri)]
+  `(let [~(symbol "conn") (connect-to-db)]
      (do
        ~@body)))
