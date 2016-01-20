@@ -40,3 +40,70 @@
   (prop/for-all [val gen/simple-type]
     (is (= [:x val]
            (dv/transform-specter [[ALL] #(conj [:x] %)] val)))))
+
+;;;; Simple properties / IDataView interface functions
+
+(defspec dataviews-satisfy-idataview
+  (prop/for-all [schema-names (gen/vector gen/symbol)]
+    (let [specs    (mapv (fn [schema-name]
+                           {:schema {:name schema-name}})
+                         schema-names)
+          overview (dv/overview {:views specs})
+          views    (mapv #(dv/get-view overview %) schema-names)]
+      (and (is (every? #(not (nil? %)) views))
+           (is (every? #(satisfies? dv/IDataView %) views))
+           (is (= (into #{} schema-names)
+                  (into #{} (map dv/get-name) views)))
+           (is (= (into #{} (map :schema) specs)
+                  (into #{} (map dv/schema) views)))))))
+
+(defspec dataviews-have-the-same-name-as-their-schemas
+  (prop/for-all [schema-name gen/symbol]
+    (let [spec     {:schema {:name schema-name}}
+          overview (dv/overview {:views [spec]})
+          view     (dv/get-view overview schema-name)]
+      (and (is (not (nil? view)))
+           (is (= schema-name (dv/get-name view)))))))
+
+(defspec dataviews-remember-their-schema
+  (prop/for-all [schema-name gen/symbol]
+    (let [spec     {:schema {:name schema-name}}
+          overview (dv/overview {:views [spec]})
+          view     (dv/get-view overview schema-name)]
+      (and (is (not (nil? view)))
+           (is (= (:schema spec) (dv/schema view)))))))
+
+;;;; Simple data views for regular collections
+
+(defspec vectors-can-be-used-as-dbs 10
+  (prop/for-all [values (gen/vector gen/any)]
+    (let [item     {:schema {:name 'item}
+                    :sources [{:type :main}]}
+          overview (dv/overview
+                    {:views [item]
+                     :conn values
+                     :query (fn [{:keys [conn]} _ _] conn)})
+          items    (dv/get-view overview 'item)]
+      (is (= values (dv/query items nil))))))
+
+(defspec queries-can-be-used-to-select-keys 10
+  (prop/for-all [values (gen/vector (gen/map
+                                     gen/simple-type
+                                     gen/simple-type
+                                     {:num-elements 200})
+                                    10)]
+    (let [item        {:schema {:name 'item}
+                       :sources [{:type :main}]}
+          overview    (dv/overview
+                       {:views [item]
+                        :conn values
+                        :query (fn [{:keys [conn]} _ {:keys [inputs]}]
+                                 (let [keys (first inputs)]
+                                   (mapv #(select-keys % keys) conn)))})
+          items       (dv/get-view overview 'item)
+          common-keys (reduce clojure.set/intersection
+                              (into #{} (keys (first values)))
+                              (map (comp (partial into #{}) keys)
+                                   (rest values)))]
+      (is (= (into #{} (map #(select-keys % common-keys)) values)
+             (into #{} (dv/query items (into [] common-keys))))))))
