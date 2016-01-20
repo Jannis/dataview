@@ -11,7 +11,7 @@
                  [com.rpl/specter "0.9.1"]
                  [datascript "0.15.0"]
                  [datomic-schema "1.3.0"]
-                 [org.clojure/clojure "1.7.0"]
+                 [org.clojure/clojure "1.8.0"]
                  [org.clojure/core.async "0.2.374"]
 
                  ;; Tests
