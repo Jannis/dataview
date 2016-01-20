@@ -27,8 +27,8 @@
 
 (defn- query-main
   [{:keys [conn query-attrs query view]} source q extra]
-  (let [attrs (query-attrs view)]
-    (query conn view
+  (let [attrs (or q (query-attrs view))]
+    (query {:conn conn :view view}
            (:query source)
            {:inputs [attrs] :extra extra})))
 
@@ -37,7 +37,7 @@
            query transform view]} source]
   (mapv (fn [entity]
           (let [id      (entity-id entity)
-                raw     (query conn view
+                raw     (query {:conn conn :view view}
                                (:query source)
                                {:inputs [id]})
                 tformed (cond->> raw
@@ -153,7 +153,7 @@
            merge-main merge-attr]
     :or {views           []
          conn            nil
-         install-schemas #()
+         install-schemas (constantly nil)
          entity-id       identity
          query-attrs     default-query-attrs
          query           default-query

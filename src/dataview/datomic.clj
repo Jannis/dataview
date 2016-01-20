@@ -71,7 +71,7 @@
 ;;;; Query execution
 
 (defn query
-  [conn view query {:keys [inputs extra]}]
+  [{:keys [conn]} query {:keys [inputs extra]}]
   {:pre [(or (vector? query)
              (map? query))
          (or (nil? inputs)
